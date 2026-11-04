@@ -1,64 +1,78 @@
-# Ankle Trainer 7-Button UI Controller Library (`interface_button`)
+# 踝关节训练器 加力控制界面库 (`interface_button`)
 
-适用于 **STM32 (HAL 库，默认适配 STM32F401RE)** 的踝关节训练器（Ankle Trainer）7 按键状态机与硬件抽象层驱动库。
+适用于 **STM32 (HAL 库，默认适配 STM32F401RE / Nucleo-F401RE)** 的踝关节训练器（Ankle Trainer）力控界面驱动库，独立、全非阻塞设计。
 
-本库采用 **全非阻塞（Non-blocking）设计**，内置 **20ms 硬件级消抖**、**待机长按连发** 以及 **6 重医疗康复器械级防呆与安全互锁机制**，无需在 STM32CubeMX 中手动配置 GPIO 引脚，开箱即用。
+本库完整驱动加力控制面板：
+
+* **2 颗加减力按钮** —— 目标力 `0.0` – `10.0 kg`，步进 `0.5 kg`
+* **1 个三态拨动开关（ON-OFF-ON）** —— 训练模式选择（`Mode 1` / `OFF` / `Mode 2`）
+* **1 颗变力状态灯** —— 每次力改变时闪烁 `150 ms`
+* **6 珠 WS2812B 幻彩灯条** —— 绿→黄→橙→红 渐变力值进度条
+
+内置 **20 ms 硬件消抖**、**长按连发**（按住 `500 ms` 后每 `150 ms` 连发一次）、**3 重防呆（Poka-Yoke）安全互锁**、**开机灯条跑马灯自检**，以及 **纯 GPIO 位脉冲（bit-bang）WS2812B 时序**（无需定时器/PWM/DMA）。所有 GPIO 均在运行时自动配置 —— **STM32CubeMX 中零 GPIO 配置，开箱即用**。
 
 ---
 
 ## 1. 文件清单与目录结构
 
-将以下两个文件直接复制到你的 STM32CubeIDE / Keil 工程目录中即可：
+将以下两个文件直接复制到你的 STM32CubeIDE / Keil MDK / CLion 工程目录中即可：
 
 | 文件名 | 放置路径 | 说明 |
 |---|---|---|
-| `interface_button.h` | `Core/Inc/interface_button.h` | 数据结构、枚举、宏配置与对外 API 声明 |
-| `interface_button.c` | `Core/Src/interface_button.c` | GPIO 自动初始化、非阻塞消抖与安全状态机实现 |
+| `interface_button.h` | `Core/Inc/interface_button.h` | 引脚宏、数据结构、枚举与对外 API 声明 |
+| `interface_button.c` | `Core/Src/interface_button.c` | GPIO 运行时初始化、非阻塞消抖、WS2812B 驱动与安全逻辑 |
 
-> **跨型号兼容提示**：本库默认包含 `#include "stm32f4xx_hal.h"`。若在 STM32F1/G4/H7 等其他系列上使用，只需将 `interface_button.h` 第 9 行改为 `#include "main.h"` 即可。
+> **跨型号兼容提示**：本库默认包含 `#include "stm32f4xx_hal.h"`。若在 STM32F1/G4/H7 等其他系列上使用，只需将 `interface_button.h` 中的该行改为 `#include "main.h"` 即可。
 
 ---
 
 ## 2. 硬件接线规范与推荐引脚 (Nucleo-F401RE)
 
-* **触发方式**：按下触发（低电平有效）。
-* **接线方法**：函数内部已自动开启 STM32 内部上拉电阻（`GPIO_PULLUP`）。**每个按钮的一端接对应的 STM32 GPIO 引脚，另一端直接接 `GND` 即可**（无需外接上拉电阻；未接按钮的悬空引脚会自动保持高电平，不会产生误触发）。
+* **触发方式**：低电平有效（接 `GND` 触发）。
+* **接线方法**：`AnkleUI_Init()` 内部已自动开启 4 路输入的 **内部上拉电阻（`GPIO_PULLUP`）**。每个按钮/开关引脚的一端接对应的 STM32 GPIO，另一端直接接 `GND`，无需外接上拉电阻。
 
-以下为在 **Nucleo-F401RE** 上推荐的无冲突引脚组合（位于 CN7 与 CN10 外侧排针）：
+### 2.1 输入通道（2 颗按钮 + 拨动开关左右 2 路）
 
-| 数组下标枚举 (`AnkleBtnIndex_t`) | 按钮功能说明 | 推荐引脚 | Nucleo 排针位置 |
+| 通道枚举 (`AnkleInputChannel_t`) | 功能 | 引脚 |
+|---|---|---|
+| `BTN_UP` (`0`) | 加力（`+0.5 kg`） | `PC12` |
+| `BTN_DOWN` (`1`) | 减力（`-0.5 kg`） | `PD2` |
+| `SW_POS_LEFT` (`2`) | 拨动开关**左档**（`Mode 1`） | `PC10` |
+| `SW_POS_RIGHT` (`3`) | 拨动开关**右档**（`Mode 2`） | `PC11` |
+
+> 三态拨动开关（ON-OFF-ON）的 **公共端接 `GND`**。左档 → `SW_STATE_LEFT_ON`（Mode 1），中间档 → `SW_STATE_CENTER_OFF`（待机），右档 → `SW_STATE_RIGHT_ON`（Mode 2）。本库只负责跟踪并上报该状态，各模式的具体行为由应用程序决定。
+
+### 2.2 输出信号（电源灯、状态灯、灯条）
+
+| 信号 | 引脚 | 接线位置 | 行为 |
 |---|---|---|---|
-| `BTN_MODE_TOGGLE` (`0`) | 切换训练模式 (`Mode 1` ↔ `Mode 2`) | `PC10` | **CN7 Pin 1** |
-| `BTN_AXIS_TOGGLE` (`1`) | 切换运动轴 (`Roll` ↔ `Pitch`) | `PC11` | **CN7 Pin 2** |
-| `BTN_ANGLE_INC` (`2`) | 角度增加 (`Angle +`，范围 `-30° ~ +30°`) | `PC12` | **CN7 Pin 3** |
-| `BTN_ANGLE_DEC` (`3`) | 角度减小 (`Angle -`，范围 `-30° ~ +30°`) | `PD2` | **CN7 Pin 4** |
-| `BTN_STRENGTH_INC` (`4`) | 力量增加 (`Strength +`，范围 `0 ~ 50 kg`) | `PC8` | **CN10 Pin 2** |
-| `BTN_STRENGTH_DEC` (`5`) | 力量减小 (`Strength -`，范围 `0 ~ 50 kg`) | `PC6` | **CN10 Pin 4** |
-| `BTN_START_RESET` (`6`) | 启动 / 急停复位 (`Start` ↔ `Stop/Reset`) | `PC5` | **CN10 Pin 6** |
+| 常亮电源灯 | `PA5` | 板载 LD2 / `D13` | 初始化后常亮 |
+| 变力状态灯 | `PA7` | `D11` / CN10 Pin 15 | 每次力改变时闪烁 `150 ms` |
+| 灯条数据脚（主） | `PA6` | `D12` / CN10 Pin 13 | 6 珠灯条 `DIN` |
+| 灯条数据脚（备用） | `PB6` | `D10` | 与 PA6 完全同步的同源信号 |
+
+> `PA6` 与 `PB6` 输出**完全相同**的位流 —— 灯条 `DIN` 接任意一个均可。
 
 ---
 
-## 3. 快速上手指南 (`main.c` 集成示例)
+## 3. 快速上手（`main.c` 示例）
 
-无需在 STM32CubeMX 中配置上述 7 个 GPIO 引脚，`AnkleUI_Init()` 会自动识别端口并开启对应的 RCC 时钟。
+`.ioc`（STM32CubeMX）中无需任何 GPIO 配置。定义引脚数组并在主循环中轮询 `AnkleUI_Update()`：
 
 ```c
 #include "main.h"
 #include "interface_button.h"
 
-/* 1. 定义全局控制器实例 */
-AnkleController_t ankle_ctrl;
-
-/* 2. 定义 7 个按钮的引脚映射数组 (可根据实际 PCB 走线自由修改端口和引脚) */
-const AnkleBtnPin_t my_button_pins[BTN_COUNT] = {
-    [BTN_MODE_TOGGLE]  = {GPIOC, GPIO_PIN_10},
-    [BTN_AXIS_TOGGLE]  = {GPIOC, GPIO_PIN_11},
-    [BTN_ANGLE_INC]    = {GPIOC, GPIO_PIN_12},
-    [BTN_ANGLE_DEC]    = {GPIOD, GPIO_PIN_2},
-    [BTN_STRENGTH_INC] = {GPIOC, GPIO_PIN_8},
-    [BTN_STRENGTH_DEC] = {GPIOC, GPIO_PIN_6},
-    [BTN_START_RESET]  = {GPIOC, GPIO_PIN_5}
+/* 1. 定义 4 路输入引脚映射（2 颗按钮 + 拨动开关左右 2 路） */
+const AnkleBtnPin_t my_pins[INPUT_COUNT] = {
+    [BTN_UP]       = PC12,
+    [BTN_DOWN]     = PD2,
+    [SW_POS_LEFT]  = PC10,
+    [SW_POS_RIGHT] = PC11
 };
+
+/* 2. 声明控制器状态（定点数 0..20 对应 0.0..10.0 kg） */
+AnkleCtrl_t ankle_ctrl = { .max_raw = 20 };
 
 int main(void) {
     HAL_Init();
@@ -66,53 +80,115 @@ int main(void) {
     MX_GPIO_Init();
     MX_USART2_UART_Init();
 
-    /* 3. 初始化按键GPIO与控制器 (参数：句柄指针, 引脚数组, 角度步长=1°, 力量步长=1kg) */
-    AnkleUI_Init(&ankle_ctrl, my_button_pins, 1, 1);
+    /* 3. 初始化：开时钟、配置上拉与 LED 输出、
+          执行卡键检测与开机灯条跑马灯自检 */
+    AnkleUI_Init(my_pins);
 
     while (1) {
-        /* 4. 非阻塞扫描：仅在状态真正发生改变时返回 true */
-        if (AnkleUI_Update(&ankle_ctrl)) {
-            // 在此处读取最新状态用于刷新 UI 或更新电机目标：
-            // ankle_ctrl.is_running  (bool: true=运行中, false=已停止/复位)
-            // ankle_ctrl.mode        (TRAINING_MODE_1 或 TRAINING_MODE_2)
-            // ankle_ctrl.axis        (AXIS_ROLL 或 AXIS_PITCH)
-            // ankle_ctrl.angle       (int16_t: -30 ~ +30)
-            // ankle_ctrl.strength    (int16_t: 0 ~ 50)
+        /* 4. 非阻塞扫描（内部使用 HAL_GetTick()） */
+        AnkleUI_Update(&ankle_ctrl);
+
+        /* 5. 处理库标记的状态变化 */
+        if (ankle_ctrl.ui_updated) {
+            // ankle_ctrl.raw_value          (uint8_t: 0..20 → 0.0..10.0 kg，步进 0.5)
+            // ankle_ctrl.display_percentage (uint8_t: 0..100 %)
+            // ankle_ctrl.active_leds        (uint8_t: 0..6)
+            // ankle_ctrl.sw_state           (SW_STATE_CENTER_OFF / LEFT_ON / RIGHT_ON)
+            // ankle_ctrl.btn_conflict       (bool: 加减力按钮同时按下)
+            // ankle_ctrl.sw_fault           (bool: 拨动开关左右两路同时导通)
+            ankle_ctrl.ui_updated = false;   // 处理完毕后清标志
         }
+        HAL_Delay(1);
     }
 }
 ```
 
+示例 `main.c` 还会在每次状态变化时向 **UART2（115200 8N1）** 打印一行状态，并在防呆互锁触发时打印一次性 `[POKA-YOKE]` 报警。
+
 ---
 
-## 4. 状态机业务逻辑与 6 重安全防呆机制
+## 4. 行为细节
 
-为了保障人体踝关节训练安全，本库在底层强制执行以下防呆互锁规则：
+### 4.1 按钮与长按连发
 
-| 机制名称 | 具体行为描述 |
+* 按钮为 **边沿触发**：每次干净按下，力值步进 `±0.5 kg`。
+* **长按连发**：按住按钮 `500 ms` 后，每 `150 ms` 自动连发一次。
+* 力值被钳位在 `min_raw`（`0.0 kg`）与 `max_raw`（`10.0 kg`）之间，到顶/到底后饱和，不会回绕。
+
+### 4.2 三态拨动开关
+
+开关为 **电平触发**（自锁触点）。档位同样经过 20 ms 消抖后上报为 `sw_state`：
+
+| 档位 | `sw_state` | 含义 |
+|---|---|---|
+| 左档 | `SW_STATE_LEFT_ON` | Mode 1 |
+| 中间档 | `SW_STATE_CENTER_OFF` | 待机 / OFF |
+| 右档 | `SW_STATE_RIGHT_ON` | Mode 2 |
+
+与旧版 7 按键设计不同，本库 **不再对按钮施加任何模式锁定** —— 任何档位下均可调整力值，模式语义完全由应用程序定义。
+
+### 4.3 WS2812B 灯条
+
+6 珠灯条作为力值比例进度条，颜色采用 **GRB** 顺序：
+
+| 灯珠 | 颜色 | 力值区间 |
+|---|---|---|
+| 第 1 颗 | 纯绿色 | 0.5 – 1.5 kg |
+| 第 2 颗 | 草绿色 | 2.0 – 3.0 kg |
+| 第 3 颗 | 亮黄色 | 3.5 – 5.0 kg |
+| 第 4 颗 | 亮橙色 | 5.5 – 6.5 kg |
+| 第 5 颗 | 深橙红 | 7.0 – 8.5 kg |
+| 第 6 颗 | 纯红色 | 9.0 – 10.0 kg |
+
+* **0.0 kg 待机**：第 1 颗灯珠常亮微弱冰蓝色（`B = 40`），一眼即可确认灯条工作正常。
+* **开机自检**：`AnkleUI_Init()` 时 6 颗灯珠跑马灯扫描一遍（约 0.4 秒），随后回到待机状态。
+* **时序**（基于 DWT 周期计数器位脉冲，`__attribute__((optimize("O2")))`）：
+  * `T0H ≈ 350 ns`、`T1H ≈ 800 ns`、单 bit 周期 ≈ `1250 ns`
+  * 复位锁存保持 `500 µs` 纯低电平 —— 确保新版 WS2812B 100% 锁存亮起
+  * 每帧约关中断 `680 µs`（6 珠 × 24 bit × 1.25 µs + 500 µs 复位），不占用定时器/PWM/DMA，灯条可接任意 GPIO
+
+### 4.4 防呆安全互锁（Poka-Yoke）
+
+| 防护 | 说明 |
 |---|---|
-| **1. 急停最高抢占权 (`BTN_START_RESET`)** | 每次扫描优先检测 `Start/Reset` 键。在运行状态下按下该键，立即切断 `is_running` 并将 `angle` 和 `strength` 归零，同时丢弃同一周期内其他按键的任何触发。 |
-| **2. 待机长按连发 vs 运行中防暴冲** | **待机时 (`STOPPED`)**：按住加减键满 `500ms` 后自动以 `100ms` 间隔快速连续加减；<br>**运行中 (`STARTED`)**：自动禁用长按连发，仅允许单次点按微调，严防电机力矩或角度瞬间暴增。 |
-| **3. 运行中模式/运动轴锁死** | 当 `is_running == true` 时，`Mode` 和 `Axis` 切换按钮被彻底锁定，防止电机运动中途发生反向突变；同时启动瞬间若检测到有其他调节键被按住，拒绝启动。 |
-| **4. Mode 2 角度锁定与自动归零** | 在 `Mode 2` 下只能修改 `Strength`，`Angle +` 与 `Angle -` 自动失效；且从 `Mode 1` 切入 `Mode 2` 瞬间，`angle` 自动安全归零 (`0°`)。 |
-| **5. 正反方向键互斥锁** | 若用户同时按下 `Angle +` 与 `Angle -`（或同时按下 `Strength +` 与 `Strength -`），两边指令同时冻结忽略，数值保持稳定不抖动。 |
-| **6. 上电防短路/卡死保险 (`armed` 锁)** | 若上电瞬间某个引脚已处于低电平（如按钮被异物压住或接线短路到 GND），该按钮会被挂上 `armed = false` 保险锁，绝不触发单按或长按狂飙，直到引脚恢复高电平满 `20ms` 后才自动解锁。 |
+| **1. 加减力互斥锁定** | `BTN_UP` 与 `BTN_DOWN` 同时按下时，力值被冻结（`btn_conflict = true`），直到松开其中一个才恢复 —— 防止数值抖动。 |
+| **2. 开关短路异常** | 拨动开关左右两路同时导通（接线故障）时，自动回落为 `SW_STATE_CENTER_OFF` 并置位 `sw_fault = true` —— 失效即安全。 |
+| **3. 开机卡键保护** | 上电时按钮若被按住（读数为 `LOW`，如按钮卡死或线路短路），其内部 `armed` 标志被清除，直到松开（`HIGH`）≥ `20 ms` 后才会解除，期间不会产生单击或连发。 |
 
 ---
 
-## 5. API 接口与可调宏参数说明
+## 5. 对外 API 与可配置宏
 
-### 对外函数接口
-* `void AnkleUI_Init(AnkleController_t *ctrl, const AnkleBtnPin_t pin_array[BTN_COUNT], int16_t angle_step, int16_t strength_step)`
-  初始化 7 个 GPIO 引脚（自动开启时钟并配置为 `GPIO_PULLUP`）及默认状态。
-* `void AnkleUI_SetSteps(AnkleController_t *ctrl, int16_t angle_step, int16_t strength_step)`
-  在程序运行过程中动态修改角度或力量的单次加减步长。
-* `bool AnkleUI_Update(AnkleController_t *ctrl)`
-  非阻塞状态更新函数，建议在主循环 `while(1)` 中直接调用。仅当业务参数实际发生变化时返回 `true`。
+### 对外函数
 
-### 可调时间与阈值宏（位于 `interface_button.h`）
-* `ANKLE_ANGLE_MIN` / `ANKLE_ANGLE_MAX`：角度上下限（默认 `-30` / `+30`）
-* `ANKLE_STRENGTH_MIN` / `ANKLE_STRENGTH_MAX`：力量上下限（默认 `0` / `50`）
-* `BTN_DEBOUNCE_MS`：按键消抖时间（默认 `20U` ms）
-* `BTN_LONG_PRESS_START_MS`：触发长按连发的按住时间阈值（默认 `500U` ms）
-* `BTN_REPEAT_INTERVAL_MS`：长按连发的步进时间间隔（默认 `100U` ms）
+* `void AnkleUI_Init(const AnkleBtnPin_t* pin_config)`
+  开启 GPIO 时钟，将 4 路输入配置为 `GPIO_PULLUP`，初始化电源灯/状态灯/灯条数据脚，执行卡键检测与开机跑马灯自检。
+* `void AnkleUI_Update(AnkleCtrl_t* ctrl)`
+  非阻塞扫描函数，在 `while(1)` 中调用（内部使用 `HAL_GetTick()`）。当力值、开关档位或故障标志发生变化时置位 `ctrl->ui_updated`。
+
+### 控制器状态（`AnkleCtrl_t`，见 `interface_button.h`）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `raw_value` | `uint8_t` | 内部定点力值：`0..20` → `0.0..10.0 kg`（步进 `0.5`） |
+| `min_raw` / `max_raw` | `uint8_t` | 力值上下限（默认 `0` / `20`） |
+| `display_percentage` | `uint8_t` | 力值进度 `0..100 %` |
+| `active_leds` | `uint8_t` | 当前点亮灯珠数 `0..6` |
+| `sw_state` | `ToggleSwitchState_t` | `SW_STATE_CENTER_OFF` / `SW_STATE_LEFT_ON` / `SW_STATE_RIGHT_ON` |
+| `btn_conflict` | `bool` | 防呆 1：加减力按钮同时按下 |
+| `sw_fault` | `bool` | 防呆 2：开关左右两路同时导通 |
+| `ui_updated` | `bool` | 状态改变标志位（处理完毕后清掉） |
+
+### 引脚简写宏（`interface_button.h`）
+
+`PC10`、`PC11`、`PC12`、`PD2` —— 展开为 `(AnkleBtnPin_t){GPIOx, GPIO_PIN_x}`，让引脚数组写法更直观。
+
+### 可配置宏
+
+| 宏 | 位置 | 默认值 | 说明 |
+|---|---|---|---|
+| `DEBOUNCE_DELAY_MS` | `interface_button.c` | `20` | 消抖滤波窗口 |
+| `AUTO_REPEAT_DELAY_MS` | `interface_button.c` | `500` | 长按连发启动阈值 |
+| `AUTO_REPEAT_RATE_MS` | `interface_button.c` | `150` | 连发间隔 |
+| `STATUS_LED_ON_MS` | `interface_button.h` | `150` | 状态灯闪烁时长 |
+| `NUM_LEDS` | `interface_button.h` | `6` | 灯条灯珠数量 |
