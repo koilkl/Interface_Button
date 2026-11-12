@@ -1,0 +1,114 @@
+/**
+ ******************************************************************************
+ * @file    interface_button.h
+ * @brief   STM32F4VE (F407VET6) 专用纯净引脚版：防1.7V掉压 + 防呆 + 6珠灯带
+ ******************************************************************************
+ */
+
+#ifndef INTERFACE_BUTTON_H
+#define INTERFACE_BUTTON_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// 自动兼容 STM32F4 (F401 / F407) 与 STM32F103
+#if defined(STM32F103xB) || defined(STM32F103xE)
+#include "stm32f1xx_hal.h"
+#else
+#include "stm32f4xx_hal.h"
+#endif
+
+#include <stdint.h>
+#include <stdbool.h>
+
+/* ==================== 0. 关键开关：解决 4.6V 变 1.7V 掉压问题 ==================== */
+// 设为 1：使用 GPIO_NOPULL (高阻态)，专门解决外部信号板 4.6V 插上后被内部电阻分压掉到 1.7V 的问题！
+// 设为 0：使用 GPIO_PULLUP (内部上拉)，适用于没有任何外部电源、直接把裸按钮接在引脚与 GND 之间的情况。
+#define USE_EXTERNAL_SIGNAL_BOARD   1
+
+// 你的信号板按下按钮时是什么电平？
+// 如果平时是 4.6V、按下变成 0V，保持为 GPIO_PIN_RESET；
+// 如果平时是 0V、按下变成 4.6V，改为 GPIO_PIN_SET！
+#define BTN_ACTIVE_LEVEL            GPIO_PIN_RESET
+
+/* ==================== 1. 输入通道定义 ==================== */
+#define INPUT_COUNT 4
+
+typedef enum {
+    BTN_UP      = 0,   // 加力按钮 (+0.5 kg)
+    BTN_DOWN    = 1,   // 减力按钮 (-0.5 kg)
+    SW_POS_LEFT = 2,   // 三态拨动开关：左档引脚
+    SW_POS_RIGHT= 3    // 三态拨动开关：右档引脚
+} AnkleInputChannel_t;
+
+typedef enum {
+    SW_STATE_CENTER_OFF = 0,
+    SW_STATE_LEFT_ON    = 1,
+    SW_STATE_RIGHT_ON   = 2
+} ToggleSwitchState_t;
+
+/* ==================== 2. 引脚结构体与 F4VE 全套纯净引脚宏 ==================== */
+typedef struct {
+    GPIO_TypeDef* port;
+    uint16_t pin;
+} AnkleBtnPin_t;
+
+// 常用纯净引脚快捷宏（你在 main.c 里插了哪个脚就直接写哪个名字！）
+#define PA0   (AnkleBtnPin_t){GPIOA, GPIO_PIN_0}
+#define PA1   (AnkleBtnPin_t){GPIOA, GPIO_PIN_1}
+#define PB0   (AnkleBtnPin_t){GPIOB, GPIO_PIN_0}
+#define PB1   (AnkleBtnPin_t){GPIOB, GPIO_PIN_1}
+#define PB10  (AnkleBtnPin_t){GPIOB, GPIO_PIN_10}
+#define PB11  (AnkleBtnPin_t){GPIOB, GPIO_PIN_11}
+#define PB12  (AnkleBtnPin_t){GPIOB, GPIO_PIN_12}
+#define PB13  (AnkleBtnPin_t){GPIOB, GPIO_PIN_13}
+#define PB14  (AnkleBtnPin_t){GPIOB, GPIO_PIN_14}
+#define PC6   (AnkleBtnPin_t){GPIOC, GPIO_PIN_6}
+#define PC7   (AnkleBtnPin_t){GPIOC, GPIO_PIN_7}
+#define PD8   (AnkleBtnPin_t){GPIOD, GPIO_PIN_8}
+#define PD9   (AnkleBtnPin_t){GPIOD, GPIO_PIN_9}
+#define PD10  (AnkleBtnPin_t){GPIOD, GPIO_PIN_10}
+#define PD11  (AnkleBtnPin_t){GPIOD, GPIO_PIN_11}
+#define PD12  (AnkleBtnPin_t){GPIOD, GPIO_PIN_12}
+#define PD13  (AnkleBtnPin_t){GPIOD, GPIO_PIN_13}
+#define PE2   (AnkleBtnPin_t){GPIOE, GPIO_PIN_2}
+#define PE3   (AnkleBtnPin_t){GPIOE, GPIO_PIN_3}
+#define PE4   (AnkleBtnPin_t){GPIOE, GPIO_PIN_4}
+
+/* ==================== 3. LED 与 6珠灯条引脚分配 (适配 STM32F4VE) ==================== */
+// 1) 常亮电源灯：PA6 (STM32F4VE 板载绿灯 D2)
+#define LED_POWER_PORT    GPIOA
+#define LED_POWER_PIN     GPIO_PIN_6
+
+// 2) 力改变时的闪烁状态灯：PA7 (STM32F4VE 板载绿灯 D3)
+#define LED_STATUS_PORT   GPIOA
+#define LED_STATUS_PIN    GPIO_PIN_7
+#define STATUS_LED_ON_MS  150
+
+// 3) 6颗 WS2812B 幻彩灯条数据脚：PB15 (纯净高速引脚)
+#define WS_PORT           GPIOB
+#define WS_PIN            GPIO_PIN_15
+#define NUM_LEDS          6
+
+/* ==================== 4. 系统主控状态结构体 ==================== */
+typedef struct {
+    uint8_t             raw_value;           // 0 ~ 20 (对应 0.0 ~ 10.0 kg，步进 0.5 kg)
+    uint8_t             min_raw;             // 0
+    uint8_t             max_raw;             // 20
+    uint8_t             display_percentage;  // 0 ~ 100%
+    uint8_t             active_leds;         // 0 ~ 6
+    ToggleSwitchState_t sw_state;            // 三态拨动开关档位
+    bool                btn_conflict;        // 防呆1：双键同按冲突
+    bool                sw_fault;            // 防呆2：拨动开关短路异常
+    bool                ui_updated;          // 状态更新标志
+} AnkleCtrl_t;
+
+void AnkleUI_Init(const AnkleBtnPin_t* pin_config);
+void AnkleUI_Update(AnkleCtrl_t* ctrl);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* INTERFACE_BUTTON_H */

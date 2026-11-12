@@ -1,10 +1,3 @@
-/**
- ******************************************************************************
- * @file    interface_button.c
- * @brief   含开机灯条自检 + 0kg蓝光待机指示 + 500us强锁存 + D12(PA6)/D10(PB6)双输出
- ******************************************************************************
- */
-
 #include "interface_button.h"
 
 typedef struct {
@@ -30,20 +23,15 @@ static bool                first_sw_sync = true;
 #define AUTO_REPEAT_DELAY_MS  500
 #define AUTO_REPEAT_RATE_MS   150
 
-// 备用灯条信号脚：PB6 (正面母座 D10)，与 PA6 (正面母座 D12) 同步输出！
-#define WS_BACKUP_PORT        GPIOB
-#define WS_BACKUP_PIN         GPIO_PIN_6
-
 static uint8_t rgb_data[NUM_LEDS][3];
 
-// 6 颗灯珠渐变色谱：[G, R, B]
 static const uint8_t COLOR_MAP[NUM_LEDS][3] = {
-    {150, 0,   0},   // 第 1 颗：纯绿色 (0.5 ~ 1.5 kg)
-    {130, 40,  0},   // 第 2 颗：草绿色 (2.0 ~ 3.0 kg)
-    {110, 100, 0},   // 第 3 颗：亮黄色 (3.5 ~ 5.0 kg)
-    {60,  150, 0},   // 第 4 颗：亮橙色 (5.5 ~ 6.5 kg)
-    {20,  150, 0},   // 第 5 颗：深橙红 (7.0 ~ 8.5 kg)
-    {0,   150, 0}    // 第 6 颗：纯红色 (9.0 ~ 10.0 kg)
+    {150, 0,   0},   // 第 1 颗：纯绿色
+    {130, 40,  0},   // 第 2 颗：草绿色
+    {110, 100, 0},   // 第 3 颗：亮黄色
+    {60,  150, 0},   // 第 4 颗：亮橙色
+    {20,  150, 0},   // 第 5 颗：深橙红
+    {0,   150, 0}    // 第 6 颗：纯红色
 };
 
 static void Enable_GPIO_Clock(GPIO_TypeDef* port) {
@@ -51,18 +39,20 @@ static void Enable_GPIO_Clock(GPIO_TypeDef* port) {
     else if (port == GPIOB) __HAL_RCC_GPIOB_CLK_ENABLE();
     else if (port == GPIOC) __HAL_RCC_GPIOC_CLK_ENABLE();
     else if (port == GPIOD) __HAL_RCC_GPIOD_CLK_ENABLE();
+#ifdef GPIOE
+    else if (port == GPIOE) __HAL_RCC_GPIOE_CLK_ENABLE();
+#endif
 }
 
-/* ==================== 强制 O2 + DWT 硬件时序 + 500us 强锁存复位 ==================== */
 __attribute__((optimize("O2"))) static void WS2812_Show(void) {
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
     const uint32_t clk_mhz    = SystemCoreClock / 1000000UL;
-    const uint32_t t0h_cycles = (clk_mhz * 350) / 1000;   // 0码高电平 ~350ns
-    const uint32_t t1h_cycles = (clk_mhz * 800) / 1000;   // 1码高电平 ~800ns
-    const uint32_t tot_cycles = (clk_mhz * 1250) / 1000;  // 单bit总周期 ~1250ns
-    const uint32_t rst_cycles = clk_mhz * 500;            // 500us 强锁存低电平复位
+    const uint32_t t0h_cycles = (clk_mhz * 350) / 1000;
+    const uint32_t t1h_cycles = (clk_mhz * 800) / 1000;
+    const uint32_t tot_cycles = (clk_mhz * 1250) / 1000;
+    const uint32_t rst_cycles = clk_mhz * 500;
 
     __disable_irq();
 
@@ -71,27 +61,20 @@ __attribute__((optimize("O2"))) static void WS2812_Show(void) {
             uint8_t byte = rgb_data[i][c];
             for (int b = 7; b >= 0; b--) {
                 uint32_t start_cycle = DWT->CYCCNT;
-
-                // 同时拉高 PA6 (D12) 和 PB6 (D10)
-                WS_PORT->BSRR        = WS_PIN;
-                WS_BACKUP_PORT->BSRR = WS_BACKUP_PIN;
+                WS_PORT->BSRR = WS_PIN;
 
                 uint32_t high_wait = ((byte >> b) & 0x01) ? t1h_cycles : t0h_cycles;
                 while ((DWT->CYCCNT - start_cycle) < high_wait) {}
 
-                // 同时拉低 PA6 (D12) 和 PB6 (D10)
-                WS_PORT->BSRR        = ((uint32_t)WS_PIN << 16);
-                WS_BACKUP_PORT->BSRR = ((uint32_t)WS_BACKUP_PIN << 16);
+                WS_PORT->BSRR = ((uint32_t)WS_PIN << 16);
 
                 while ((DWT->CYCCNT - start_cycle) < tot_cycles) {}
             }
         }
     }
 
-    // 关键修复：保持 >500us 纯低电平，确保新版 WS2812B 100% 锁存亮起！
     uint32_t rst_start = DWT->CYCCNT;
-    WS_PORT->BSRR        = ((uint32_t)WS_PIN << 16);
-    WS_BACKUP_PORT->BSRR = ((uint32_t)WS_BACKUP_PIN << 16);
+    WS_PORT->BSRR = ((uint32_t)WS_PIN << 16);
     while ((DWT->CYCCNT - rst_start) < rst_cycles) {}
 
     __enable_irq();
@@ -115,13 +98,9 @@ static uint8_t WS2812_UpdateStrip(uint8_t raw_value) {
         if (i < num_lit) {
             WS2812_SetLED(i, COLOR_MAP[i][0], COLOR_MAP[i][1], COLOR_MAP[i][2]);
         } else {
+            // 当力为 0 或未达到该档位时，彻底熄灭为 (0,0,0)，不再发蓝紫光！
             WS2812_SetLED(i, 0, 0, 0);
         }
-    }
-
-    // 当力为 0.0 kg 时，让第 1 颗灯珠亮微弱的待机冰蓝色 (B=40)，一眼确认灯条工作正常！
-    if (raw_value == 0) {
-        WS2812_SetLED(0, 0, 0, 40);
     }
 
     WS2812_Show();
@@ -144,6 +123,7 @@ static bool Step_ForceValue(AnkleCtrl_t* ctrl, int8_t dir) {
 }
 
 static void Trigger_StatusLED(uint32_t now) {
+    // 只有当 Force 改变时，输出高电平 (SET) 点亮 Status LED！
     HAL_GPIO_WritePin(LED_STATUS_PORT, LED_STATUS_PIN, GPIO_PIN_SET);
     status_led_active   = true;
     status_led_start_ms = now;
@@ -152,15 +132,15 @@ static void Trigger_StatusLED(uint32_t now) {
 void AnkleUI_Init(const AnkleBtnPin_t* pin_config) {
     uint32_t now = HAL_GetTick();
     GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_PinState inactive_level = (BTN_ACTIVE_LEVEL == GPIO_PIN_RESET) ? GPIO_PIN_SET : GPIO_PIN_RESET;
 
-    // 1. 初始化 4 路输入引脚 (PULLUP)
     for (int i = 0; i < INPUT_COUNT; i++) {
         inputs[i].pin_cfg = pin_config[i];
         Enable_GPIO_Clock(inputs[i].pin_cfg.port);
 
         GPIO_InitStruct.Pin   = inputs[i].pin_cfg.pin;
         GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;
-        GPIO_InitStruct.Pull  = GPIO_PULLUP;
+        GPIO_InitStruct.Pull  = (BTN_ACTIVE_LEVEL == GPIO_PIN_RESET) ? GPIO_PULLUP : GPIO_PULLDOWN;
         GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
         HAL_GPIO_Init(inputs[i].pin_cfg.port, &GPIO_InitStruct);
 
@@ -173,26 +153,23 @@ void AnkleUI_Init(const AnkleBtnPin_t* pin_config) {
 
         if (i == BTN_UP || i == BTN_DOWN) {
             inputs[i].is_active = false;
-            inputs[i].armed     = (init_pin == GPIO_PIN_SET);
+            inputs[i].armed     = (init_pin == inactive_level);
         } else {
-            inputs[i].is_active = (init_pin == GPIO_PIN_RESET);
+            inputs[i].is_active = (init_pin == BTN_ACTIVE_LEVEL);
             inputs[i].armed     = true;
         }
     }
 
-    // 2. 初始化常亮电源灯 PA5 (LD2) 與 变力状态灯 PA7 (D11)
-    Enable_GPIO_Clock(LED_POWER_PORT);
-    GPIO_InitStruct.Pin   = LED_POWER_PIN;
+    // 初始化 Status LED (PA7)，开机默认输出低电平 (RESET) 熄灭！
+    Enable_GPIO_Clock(LED_STATUS_PORT);
+    GPIO_InitStruct.Pin   = LED_STATUS_PIN;
     GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull  = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(LED_POWER_PORT, &GPIO_InitStruct);
-
-    Enable_GPIO_Clock(LED_STATUS_PORT);
-    GPIO_InitStruct.Pin   = LED_STATUS_PIN;
     HAL_GPIO_Init(LED_STATUS_PORT, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(LED_STATUS_PORT, LED_STATUS_PIN, GPIO_PIN_RESET);
 
-    // 3. 初始化灯条主引脚 PA6 (正面母座 D12) 与 备用引脚 PB6 (正面母座 D10)
+    // 初始化 6 珠 WS2812B 灯条引脚 (PB15)
     Enable_GPIO_Clock(WS_PORT);
     GPIO_InitStruct.Pin   = WS_PIN;
     GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
@@ -200,22 +177,13 @@ void AnkleUI_Init(const AnkleBtnPin_t* pin_config) {
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     HAL_GPIO_Init(WS_PORT, &GPIO_InitStruct);
     HAL_GPIO_WritePin(WS_PORT, WS_PIN, GPIO_PIN_RESET);
-
-    Enable_GPIO_Clock(WS_BACKUP_PORT);
-    GPIO_InitStruct.Pin   = WS_BACKUP_PIN;
-    HAL_GPIO_Init(WS_BACKUP_PORT, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(WS_BACKUP_PORT, WS_BACKUP_PIN, GPIO_PIN_RESET);
     HAL_Delay(5);
 
-    // 4. 点亮电源灯，并执行开机 6 颗灯珠跑马灯自检 (持续约 0.4 秒)
-    HAL_GPIO_WritePin(LED_POWER_PORT, LED_POWER_PIN, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(LED_STATUS_PORT, LED_STATUS_PIN, GPIO_PIN_RESET);
-
-    for (uint8_t step = 2; step <= 20; step += 4) {
+    // 开机自检后，0kg 状态全部灯珠熄灭
+    for (uint8_t step = 4; step <= 20; step += 4) {
         WS2812_UpdateStrip(step);
-        HAL_Delay(60);
+        HAL_Delay(50);
     }
-    // 自检完毕，回到 0.0 kg 待机状态 (第 1 颗灯常亮微弱冰蓝光)
     WS2812_UpdateStrip(0);
 }
 
@@ -223,10 +191,12 @@ void AnkleUI_Update(AnkleCtrl_t* ctrl) {
     uint32_t now = HAL_GetTick();
     bool force_changed = false;
     bool single_edge_trig[2] = {false, false};
+    GPIO_PinState inactive_level = (BTN_ACTIVE_LEVEL == GPIO_PIN_RESET) ? GPIO_PIN_SET : GPIO_PIN_RESET;
 
     if (ctrl->max_raw == 0) ctrl->max_raw = 20;
     if (ctrl->raw_value > ctrl->max_raw) ctrl->raw_value = ctrl->max_raw;
 
+    // 150ms 到期后，自动把 Status LED 拉回低电平 (RESET) 熄灭！
     if (status_led_active && ((now - status_led_start_ms) >= STATUS_LED_ON_MS)) {
         HAL_GPIO_WritePin(LED_STATUS_PORT, LED_STATUS_PIN, GPIO_PIN_RESET);
         status_led_active = false;
@@ -242,9 +212,9 @@ void AnkleUI_Update(AnkleCtrl_t* ctrl) {
 
         if ((now - inputs[i].last_debounce_ms) >= DEBOUNCE_DELAY_MS) {
             if (!inputs[i].armed) {
-                if (raw_pin == GPIO_PIN_SET) {
+                if (raw_pin == inactive_level) {
                     inputs[i].armed        = true;
-                    inputs[i].stable_state = GPIO_PIN_SET;
+                    inputs[i].stable_state = inactive_level;
                     inputs[i].is_active    = false;
                 }
                 continue;
@@ -253,7 +223,7 @@ void AnkleUI_Update(AnkleCtrl_t* ctrl) {
             if (raw_pin != inputs[i].stable_state) {
                 inputs[i].stable_state = raw_pin;
 
-                if (inputs[i].stable_state == GPIO_PIN_RESET) {
+                if (inputs[i].stable_state == BTN_ACTIVE_LEVEL) {
                     inputs[i].is_active      = true;
                     inputs[i].press_start_ms = now;
                     inputs[i].last_repeat_ms = now;
@@ -278,13 +248,9 @@ void AnkleUI_Update(AnkleCtrl_t* ctrl) {
         new_sw_state   = SW_STATE_CENTER_OFF;
     } else {
         ctrl->sw_fault = false;
-        if (left_on) {
-            new_sw_state = SW_STATE_LEFT_ON;
-        } else if (right_on) {
-            new_sw_state = SW_STATE_RIGHT_ON;
-        } else {
-            new_sw_state = SW_STATE_CENTER_OFF;
-        }
+        if (left_on)       new_sw_state = SW_STATE_LEFT_ON;
+        else if (right_on) new_sw_state = SW_STATE_RIGHT_ON;
+        else               new_sw_state = SW_STATE_CENTER_OFF;
     }
 
     if (first_sw_sync || (new_sw_state != last_sw_state)) {
